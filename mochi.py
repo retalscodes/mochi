@@ -1,8 +1,58 @@
 import tkinter as tk
 import math, random, colorsys, threading, winsound
+import urllib.request, json, subprocess, sys
+
+# ── PYGAME AUTO-INSTALL ──────────────────────────────────────────────────────
+try:
+    import pygame
+    pygame.mixer.pre_init(44100, -16, 2, 2048)
+    pygame.mixer.init()
+    HAS_MUSIC = True
+except ImportError:
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install", "pygame", "-q"],
+                       capture_output=True, check=True)
+        import pygame
+        pygame.mixer.pre_init(44100, -16, 2, 2048)
+        pygame.mixer.init()
+        HAS_MUSIC = True
+    except Exception:
+        HAS_MUSIC = False
+except Exception:
+    HAS_MUSIC = False
+
+BREAK_PROMPTS = [
+    "💧  drink some water",
+    "🧘  take 3 deep breaths",
+    "👀  look 20 ft away for 20 sec",
+    "🤸  stretch your neck & shoulders",
+    "🚶  stand up and walk around",
+    "😌  close your eyes a moment",
+    "🙌  shake out your hands & wrists",
+    "🍎  have a small snack",
+    "📵  step away from the screen",
+    "☀️  step outside if you can",
+]
+
+RADIO_TAGS = {
+    "🎵 Lofi":      "lofi",
+    "🎷 Jazz":      "jazz",
+    "🎻 Classical": "classical",
+    "🌿 Ambient":   "ambient",
+}
+
 
 class Pomodoro:
-    PRESETS = [("20 / 10", 20, 10), ("25 / 5", 25, 5), ("40 / 20", 40, 20), ("50 / 10", 50, 10)]
+    PRESETS = [("20 / 10", 20, 10), ("25 / 5", 25, 5),
+               ("40 / 20", 40, 20), ("50 / 10", 50, 10)]
+
+    THEMES = {
+        "purple": {"hue": 0.72, "acc": "#9d8fff", "bg": "#0a0a1c", "label": "✨ Purple"},
+        "ocean":  {"hue": 0.59, "acc": "#5eb8ff", "bg": "#040e1a", "label": "🌊 Ocean"},
+        "forest": {"hue": 0.37, "acc": "#6fcf7e", "bg": "#04140a", "label": "🌿 Forest"},
+        "sakura": {"hue": 0.93, "acc": "#ff8fbc", "bg": "#180810", "label": "🌸 Sakura"},
+        "sunset": {"hue": 0.07, "acc": "#ffaa55", "bg": "#180c04", "label": "🌅 Sunset"},
+    }
 
     def __init__(self):
         self.root = tk.Tk()
@@ -10,30 +60,42 @@ class Pomodoro:
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.94)
         self.W, self.H = 320, 410
+        self._nW, self._nH = self.W, self.H          # saved normal size
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        self.root.geometry(f"{self.W}x{self.H}+{sw - self.W - 24}+{sh - self.H - 64}")
+        self.root.geometry(f"{self.W}x{self.H}+{sw-self.W-24}+{sh-self.H-64}")
 
-        self.state   = "idle"
-        self.focus_m = tk.IntVar(value=25)
-        self.break_m = tk.IntVar(value=5)
-        self.rounds  = tk.IntVar(value=4)
-        self.task    = tk.StringVar()
-        self.round_n  = 0
-        self.streak   = 0
-        self.checklist = []  # list of {"text": str, "done": bool}
+        # state
+        self.state      = "idle"
+        self.mini       = False
+        self.theme_key  = "purple"
+        self.focus_m    = tk.IntVar(value=25)
+        self.break_m    = tk.IntVar(value=5)
+        self.rounds     = tk.IntVar(value=4)
+        self.task       = tk.StringVar()
+        self.round_n    = 0
+        self.streak     = 0
+        self.checklist  = []
         self.tl = 0
         self.tt = 1
-        self.paused  = False
-        self._job    = None
-        self.time_id = None
-        self.streak_id = None
-        self.pause_btn = None
+        self.paused     = False
+        self._job       = None
+        self.time_id    = None
+        self.streak_id  = None
+        self.pause_btn  = None
 
-        # aurora blobs
+        # music
+        self.stations      = {}
+        self.station_idx   = {}
+        self.current_tag   = None
+        self.music_playing = False
+        self.music_loading = False
+        self.music_volume  = 0.7
+
+        # aurora
         random.seed()
         self.t = 0.0
         self.blobs = [{
-            "x": random.random(), "y": random.random(),
+            "x":  random.random(), "y":  random.random(),
             "vx": (random.random() - .5) * .0025,
             "vy": (random.random() - .5) * .0025,
             "r":  .22 + random.random() * .22,
@@ -45,23 +107,31 @@ class Pomodoro:
         self.cv.pack(fill="both", expand=True)
 
         self._ox = self._oy = 0
-        self._resizing = False
-        self._rx = self._ry = 0
-        self.cv.bind("<ButtonPress-1>", self._drag_start)
-        self.cv.bind("<B1-Motion>",     self._drag_move)
+        self.cv.bind("<ButtonPress-1>",   self._drag_start)
+        self.cv.bind("<B1-Motion>",       self._drag_move)
+        self.cv.bind("<Double-Button-1>", self._on_dbl)
 
         self._tick_anim()
         self._show_idle()
         self.root.mainloop()
 
-    # ── ANIMATION ────────────────────────────────────────────────────────────────
+    # ── THEME ────────────────────────────────────────────────────────────────────
+
+    @property
+    def theme(self):
+        return self.THEMES[self.theme_key]
 
     def _hue(self):
-        return {"focus": .63, "break": .40, "done": .55, "checklist": .50}.get(self.state, .72)
+        base = self.theme["hue"]
+        off  = {"focus": -.09, "break": -.30, "done": -.17, "music": -.05}
+        return (base + off.get(self.state, 0)) % 1.0
+
+    # ── ANIMATION ────────────────────────────────────────────────────────────────
 
     def _tick_anim(self):
         self.t += .018
         h0 = self._hue()
+        self.cv.config(bg=self.theme["bg"])
         self.cv.delete("bg")
 
         for bl in self.blobs:
@@ -69,7 +139,6 @@ class Pomodoro:
             bl["y"] += bl["vy"] + .0006 * math.cos(self.t * .4 + bl["ph"])
             if not (-.25 < bl["x"] < 1.25): bl["vx"] *= -1
             if not (-.25 < bl["y"] < 1.25): bl["vy"] *= -1
-
             hue = (h0 + .18 * math.sin(self.t * .2 + bl["ph"])) % 1.0
             val = .38 + .10 * math.sin(self.t * .3 + bl["ph"])
             r, g, b = colorsys.hsv_to_rgb(hue, .65, val)
@@ -80,21 +149,16 @@ class Pomodoro:
             self.cv.create_oval(cx-rad, cy-rad, cx+rad, cy+rad,
                                 fill=c, outline="", tags="bg")
 
-        # dark vignette overlay
         self.cv.create_rectangle(0, 0, self.W, self.H,
                                  fill="#000000", outline="", stipple="gray50", tags="bg")
 
-        # resize grip — bottom-right corner dots
-        gx, gy = self.W - 5, self.H - 5
-        for i in range(3):
-            d = i * 5
-            self.cv.create_line(gx - d, gy, gx, gy - d,
-                                fill="#555577", width=1, tags="bg")
+        if self.mini:
+            self._draw_mini()
+        else:
+            if self.state in ("focus", "break") and self.tt > 0:
+                self._draw_ring()
+            self.cv.tag_raise("ui")
 
-        if self.state in ("focus", "break") and self.tt > 0:
-            self._draw_ring()
-
-        self.cv.tag_raise("ui")
         self.cv.after(18, self._tick_anim)
 
     def _draw_ring(self):
@@ -102,11 +166,69 @@ class Pomodoro:
         self.cv.create_arc(cx-r, cy-r, cx+r, cy+r,
                            start=90, extent=359.9,
                            outline="#333355", width=10, style="arc", tags="bg")
-        col = "#64b5f6" if self.state == "focus" else "#81c784"
+        col = self.theme["acc"] if self.state == "focus" else "#81c784"
         ext = max(1.0, 360 * (self.tl / self.tt))
         self.cv.create_arc(cx-r, cy-r, cx+r, cy+r,
                            start=90, extent=ext,
                            outline=col, width=10, style="arc", tags="bg")
+
+    # ── MINI MODE ────────────────────────────────────────────────────────────────
+
+    def _draw_mini(self):
+        self.cv.delete("ui")
+        acc  = self.theme["acc"]
+        cats = ["(=^ω^=)", "(=^-^=)", "( =ω= )", "(=^•^=)"]
+        cat  = cats[int(self.t * 0.8) % len(cats)]
+        self.cv.create_text(32, self.H // 2, text=cat,
+                            font=("Segoe UI", 10), fill=acc, anchor="center", tags="ui")
+        if self.state in ("focus", "break"):
+            label = "FOCUS" if self.state == "focus" else "BREAK"
+            self.cv.create_text(self.W // 2, 13,
+                                text=label, font=("Segoe UI", 7, "bold"),
+                                fill=acc, anchor="center", tags="ui")
+            self.cv.create_text(self.W // 2, self.H // 2,
+                                text=self._fmt(self.tl),
+                                font=("Segoe UI", 15, "bold"),
+                                fill="white", anchor="center", tags="ui")
+            frac = self.tl / self.tt if self.tt else 0
+            for i in range(10):
+                x = self.W // 2 - 44 + i * 10
+                filled = i < int(frac * 10)
+                self.cv.create_oval(x-3, self.H-14, x+3, self.H-8,
+                                    fill=acc if filled else "#333355",
+                                    outline="", tags="ui")
+        else:
+            self.cv.create_text(self.W // 2, self.H // 2, text="mochi 🍡",
+                                font=("Segoe UI", 11, "bold"),
+                                fill="white", anchor="center", tags="ui")
+        self.cv.create_text(self.W - 10, 10, text="⛶",
+                            font=("Segoe UI", 9), fill="#555577",
+                            anchor="ne", tags="ui")
+
+    def _go_mini(self):
+        self._nW, self._nH = self.W, self.H
+        self.mini = True
+        self.W, self.H = 230, 68
+        self._clear()
+        self.root.geometry(f"{self.W}x{self.H}")
+        self.cv.config(width=self.W, height=self.H)
+
+    def _go_normal(self):
+        self.mini = False
+        self.W, self.H = self._nW, self._nH
+        self.root.geometry(f"{self.W}x{self.H}")
+        self.cv.config(width=self.W, height=self.H)
+        redraw = {
+            "idle": self._show_idle, "setup": self._show_setup,
+            "focus": self._render_timer, "break": self._render_timer,
+            "done": self._show_done, "checklist": self._show_checklist,
+            "music": self._show_music, "settings": self._show_settings,
+        }
+        redraw.get(self.state, self._show_idle)()
+
+    def _on_dbl(self, _):
+        if self.mini:
+            self._go_normal()
 
     # ── HELPERS ──────────────────────────────────────────────────────────────────
 
@@ -129,27 +251,32 @@ class Pomodoro:
         return b
 
     def _close_btn(self):
-        self._btn("✕", self.root.destroy, self.W - 22, 14, w=24, h=20,
+        self._btn("✕", self.root.destroy, self.W-22, 14, w=24, h=20,
                   bg="#222233", fg="#888899", size=8)
 
-    # ── SCREENS ──────────────────────────────────────────────────────────────────
+    def _mini_btn(self):
+        self._btn("▂", self._go_mini, self.W-46, 14, w=24, h=20,
+                  bg="#222233", fg="#888899", size=8)
+
+    # ── IDLE ─────────────────────────────────────────────────────────────────────
 
     def _show_idle(self):
         self._cancel_timer()
         self.state = "idle"
         self._clear()
+        acc = self.theme["acc"]
 
-        self._txt(self.W//2, 28,  "🍅  Focus Timer", 15, bold=True)
-        self._txt(self.W//2, 52,  f"🔥  {self.streak} sessions today", 9, color="#aaaadd")
-        self._txt(self.W//2, 82,  "Quick start", 9, color="#8888bb")
+        self._txt(self.W//2, 26, "🍡  mochi", 16, bold=True, color=acc)
+        self._txt(self.W//2, 50, f"🔥  {self.streak} sessions today", 9, color="#aaaadd")
+        self._txt(self.W//2, 76, "Quick start", 9, color="#8888bb")
 
         for i, (lbl, fm, bm) in enumerate(self.PRESETS):
             bx = 88 + (i % 2) * 144
-            by = 108 + (i // 2) * 46
+            by = 102 + (i // 2) * 44
             self._btn(lbl, lambda f=fm, b=bm: self._pick_preset(f, b),
-                      bx, by, w=124, h=34, bg="#2e2e5e")
+                      bx, by, w=124, h=32, bg="#2e2e5e")
 
-        self._txt(self.W//2, 205, "or set custom", 9, color="#8888bb")
+        self._txt(self.W//2, 192, "or custom", 9, color="#8888bb")
 
         row = tk.Frame(self.root, bg="#14142e")
         for var, label in [(self.focus_m, "Focus"), (self.break_m, "Break"), (self.rounds, "×")]:
@@ -158,21 +285,27 @@ class Pomodoro:
             tk.Spinbox(row, textvariable=var, from_=1, to=99, width=3,
                        bg="#1e1e40", fg="white", buttonbackground="#2e2e5e",
                        font=("Segoe UI", 10), relief="flat").pack(side="left")
-        self.cv.create_window(self.W//2, 232, window=row, tags="ui", height=28, width=252)
+        self.cv.create_window(self.W//2, 218, window=row, tags="ui", height=28, width=252)
 
-        self._btn("▶  Start", self._show_setup, self.W//2, 268, w=144, h=40,
+        self._btn("▶  Start", self._show_setup, self.W//2, 262, w=144, h=38,
                   bg="#4040a0", size=11)
+
         done_count = sum(1 for x in self.checklist if x["done"])
         total      = len(self.checklist)
-        badge      = f"  ({done_count}/{total})" if total else ""
-        self._btn(f"📋  My List{badge}", self._show_checklist,
-                  self.W//2, 322, w=144, h=32, bg="#2a2a50", size=9)
+        badge      = f" ({done_count}/{total})" if total else ""
+        self._btn(f"📋{badge}", self._show_checklist, self.W//2-90, 314, w=54, h=30, bg="#2a2a50", size=10)
+        self._btn("🎵",         self._show_music,     self.W//2,    314, w=54, h=30, bg="#2a2a50", size=10)
+        self._btn("⚙",          self._show_settings,  self.W//2+90, 314, w=54, h=30, bg="#2a2a50", size=10)
+
+        self._mini_btn()
         self._close_btn()
 
     def _pick_preset(self, fm, bm):
         self.focus_m.set(fm)
         self.break_m.set(bm)
         self._show_setup()
+
+    # ── SETUP ────────────────────────────────────────────────────────────────────
 
     def _show_setup(self):
         self.state = "setup"
@@ -191,12 +324,14 @@ class Pomodoro:
         e.bind("<Return>", lambda _: self._start_session())
 
         self._txt(self.W//2, 138, "press Enter or click below", 8, color="#666699")
-
         self._btn("▶  Let's go", self._start_session, self.W//2, 178, w=150, h=38,
                   bg="#4040a0", size=11)
         self._btn("← Back", self._show_idle, self.W//2, 226, w=90, h=28,
                   bg="#252540", size=9)
+        self._mini_btn()
         self._close_btn()
+
+    # ── TIMER ────────────────────────────────────────────────────────────────────
 
     def _start_session(self):
         self.round_n = 0
@@ -221,37 +356,39 @@ class Pomodoro:
     def _render_timer(self):
         self._clear()
         is_focus = self.state == "focus"
-        col = "#64b5f6" if is_focus else "#81c784"
+        acc = self.theme["acc"]
+        col = acc if is_focus else "#81c784"
 
-        self._txt(self.W//2, 26,  "FOCUS" if is_focus else "💤  BREAK", 11, bold=True, color=col)
-        self._txt(self.W//2, 46,
-                  f"Round {self.round_n + 1} of {self.rounds.get()}", 9, color="#9999cc")
+        self._txt(self.W//2, 26, "FOCUS" if is_focus else "💤  BREAK", 11, bold=True, color=col)
+        self._txt(self.W//2, 46, f"Round {self.round_n+1} of {self.rounds.get()}", 9, color="#9999cc")
         task = self.task.get().strip()
         if task:
-            # truncate long task names
             display = task if len(task) <= 30 else task[:28] + "…"
             self._txt(self.W//2, 64, f"📌 {display}", 9, color="#ccccff")
 
         self.time_id = self.cv.create_text(
-            self.W//2, 185,
-            text=self._fmt(self.tl),
-            font=("Segoe UI", 40, "bold"), fill="white", tags="ui"
-        )
+            self.W//2, 185, text=self._fmt(self.tl),
+            font=("Segoe UI", 40, "bold"), fill="white", tags="ui")
         self.streak_id = self.cv.create_text(
-            self.W//2, 232,
-            text=f"🔥 {self.streak}",
-            font=("Segoe UI", 10), fill="#8888bb", tags="ui"
-        )
+            self.W//2, 232, text=f"🔥 {self.streak}",
+            font=("Segoe UI", 10), fill="#8888bb", tags="ui")
 
-        self.pause_btn = self._btn(
-            "⏸  Pause", self._toggle_pause,
-            self.W//2 - 64, 298, w=110, h=34, bg="#2e2e5e"
-        )
+        if not is_focus:
+            prompt = random.choice(BREAK_PROMPTS)
+            self._txt(self.W//2, 262, prompt, 9, color="#99bb99")
+
+        btn_y  = 300 if is_focus else 318
+        hint_y = 360 if is_focus else 374
+
+        self.pause_btn = self._btn("⏸  Pause", self._toggle_pause,
+                                   self.W//2-64, btn_y, w=110, h=34, bg="#2e2e5e")
         self._btn("↺  Reset", self._show_idle,
-                  self.W//2 + 64, 298, w=110, h=34, bg="#2e2e40")
+                  self.W//2+64, btn_y, w=110, h=34, bg="#2e2e40")
 
-        hint = "focus — no skipping ahead" if is_focus else "💤 enforced rest — breathe"
-        self._txt(self.W//2, 348, hint, 8, color="#555577")
+        hint = "focus — no skipping" if is_focus else "💤 rest is enforced"
+        self._txt(self.W//2, hint_y, hint, 8, color="#555577")
+
+        self._mini_btn()
         self._close_btn()
 
     def _fmt(self, secs):
@@ -299,6 +436,8 @@ class Pomodoro:
             self._job = None
         self.paused = False
 
+    # ── DONE ─────────────────────────────────────────────────────────────────────
+
     def _show_done(self):
         self.state = "done"
         self._cancel_timer()
@@ -307,16 +446,15 @@ class Pomodoro:
 
         self._txt(self.W//2,  70, "🎉", 36)
         self._txt(self.W//2, 120, "All done!", 20, bold=True)
-        self._txt(self.W//2, 152,
-                  f"Completed {self.rounds.get()} rounds", 11, color="#9999cc")
+        self._txt(self.W//2, 152, f"Completed {self.rounds.get()} rounds", 11, color="#9999cc")
         task = self.task.get().strip()
         if task:
-            self._txt(self.W//2, 176, f'“{task}”', 9, color="#ccccff")
-        self._txt(self.W//2, 215,
-                  f"🔥 {self.streak} sessions today", 13, bold=True, color="#ffcc44")
-
+            self._txt(self.W//2, 176, f'"{task}"', 9, color="#ccccff")
+        self._txt(self.W//2, 215, f"🔥 {self.streak} sessions today",
+                  13, bold=True, color="#ffcc44")
         self._btn("▶  New session", self._show_idle,
                   self.W//2, 272, w=154, h=40, bg="#4040a0", size=11)
+        self._mini_btn()
         self._close_btn()
 
     # ── CHECKLIST ────────────────────────────────────────────────────────────────
@@ -324,26 +462,25 @@ class Pomodoro:
     def _show_checklist(self):
         self.state = "checklist"
         self._clear()
+        acc = self.theme["acc"]
 
         self._txt(self.W//2, 26, "📋  My List", 14, bold=True)
-
         done_count = sum(1 for x in self.checklist if x["done"])
-        total      = len(self.checklist)
+        total = len(self.checklist)
         self._txt(self.W//2, 48,
-                  f"{done_count} of {total} done" if total else "nothing here yet — add something!",
+                  f"{done_count} of {total} done" if total else "nothing here yet!",
                   9, color="#8888bb")
 
-        # ── scrollable list ──────────────────────────────────────────────────────
-        outer = tk.Frame(self.root, bg="#0e0e26", bd=0)
-        list_cv = tk.Canvas(outer, bg="#0e0e26", highlightthickness=0, width=270, height=218)
+        outer   = tk.Frame(self.root, bg="#0e0e26", bd=0)
+        list_cv = tk.Canvas(outer, bg="#0e0e26", highlightthickness=0, width=270, height=210)
         sb = tk.Scrollbar(outer, orient="vertical", command=list_cv.yview,
                           bg="#1a1a3a", troughcolor="#0e0e26")
         list_cv.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         list_cv.pack(side="left", fill="both", expand=True)
         inner = tk.Frame(list_cv, bg="#0e0e26")
-        inner_id = list_cv.create_window(0, 0, window=inner, anchor="nw", width=270)
-        self.cv.create_window(self.W//2, 170, window=outer, width=286, height=218, tags="ui")
+        list_cv.create_window(0, 0, window=inner, anchor="nw", width=270)
+        self.cv.create_window(self.W//2, 165, window=outer, width=286, height=210, tags="ui")
 
         new_text = tk.StringVar()
 
@@ -354,25 +491,21 @@ class Pomodoro:
                 done  = item["done"]
                 color = "#555577" if done else "#ddddff"
                 sym   = "✓" if done else "○"
-                label = item["text"]
-                if len(label) > 26:
-                    label = label[:24] + "…"
-
+                label = item["text"][:26] + ("…" if len(item["text"]) > 26 else "")
                 row = tk.Frame(inner, bg="#0e0e26")
                 row.pack(fill="x", padx=4, pady=2)
-
                 tk.Button(row, text=sym, command=lambda i=i: toggle(i),
-                          bg="#0e0e26", fg="#64b5f6" if done else "#6666aa",
+                          bg="#0e0e26", fg=acc if done else "#6666aa",
                           font=("Segoe UI", 10), relief="flat", bd=0,
                           cursor="hand2", width=2).pack(side="left")
                 tk.Label(row, text=label, bg="#0e0e26", fg=color, anchor="w",
-                         font=("Segoe UI", 9, "overstrike" if done else "normal")
+                         font=("Segoe UI", 9,
+                               "overstrike" if done else "normal")
                          ).pack(side="left", fill="x", expand=True)
                 tk.Button(row, text="×", command=lambda i=i: delete(i),
                           bg="#0e0e26", fg="#554455", activeforeground="#ff6666",
                           font=("Segoe UI", 8), relief="flat", bd=0,
                           cursor="hand2").pack(side="right", padx=2)
-
             inner.update_idletasks()
             list_cv.configure(scrollregion=list_cv.bbox("all"))
 
@@ -395,27 +528,199 @@ class Pomodoro:
             self.checklist = [x for x in self.checklist if not x["done"]]
             refresh()
 
-        # bind mousewheel scrolling
-        def _on_wheel(e):
-            list_cv.yview_scroll(int(-1 * (e.delta / 120)), "units")
-        list_cv.bind("<MouseWheel>", _on_wheel)
-        inner.bind("<MouseWheel>", _on_wheel)
-
+        list_cv.bind("<MouseWheel>",
+                     lambda e: list_cv.yview_scroll(int(-1*(e.delta/120)), "units"))
+        inner.bind("<MouseWheel>",
+                   lambda e: list_cv.yview_scroll(int(-1*(e.delta/120)), "units"))
         refresh()
 
-        # ── add item row ─────────────────────────────────────────────────────────
         e = tk.Entry(self.root, textvariable=new_text,
                      font=("Segoe UI", 10), bg="#1a1a3a", fg="white",
                      insertbackground="white", relief="flat", justify="left")
-        self.cv.create_window(self.W//2 - 22, 300, window=e, width=224, height=30, tags="ui")
+        self.cv.create_window(self.W//2-22, 290, window=e, width=224, height=30, tags="ui")
         e.focus_set()
         e.bind("<Return>", lambda _: add_item())
-        self._btn("+", add_item, self.W//2 + 118, 300, w=30, h=30, bg="#4040a0", size=12)
+        self._btn("+", add_item, self.W//2+118, 290, w=30, h=30, bg="#4040a0", size=12)
 
-        # ── bottom row ───────────────────────────────────────────────────────────
-        self._btn("← Back", self._show_idle,  self.W//2 - 58, 348, w=100, h=28, bg="#252540", size=9)
-        self._btn("clear done", clear_done,   self.W//2 + 60, 348, w=96,  h=28, bg="#2a2020", fg="#aa7777", size=8)
+        self._btn("← Back",  self._show_idle, self.W//2-58, 338, w=100, h=28, bg="#252540", size=9)
+        self._btn("clear ✓", clear_done,      self.W//2+60, 338, w=96,  h=28,
+                  bg="#2a2020", fg="#aa7777", size=8)
+        self._mini_btn()
         self._close_btn()
+
+    # ── MUSIC ────────────────────────────────────────────────────────────────────
+
+    def _show_music(self):
+        self.state = "music"
+        self._clear()
+        acc = self.theme["acc"]
+
+        self._txt(self.W//2, 26, "🎵  Radio", 14, bold=True)
+
+        if not HAS_MUSIC:
+            self._txt(self.W//2, 130, "pygame not available", 10, color="#aa7777")
+            self._txt(self.W//2, 155, "pip install pygame", 9, color="#666688")
+            self._btn("← Back", self._show_idle, self.W//2, 210, w=90, h=28,
+                      bg="#252540", size=9)
+            self._close_btn()
+            return
+
+        self._txt(self.W//2, 52, "choose a genre", 9, color="#8888bb")
+
+        tags = list(RADIO_TAGS.items())
+        for i, (label, tag) in enumerate(tags):
+            bx     = 84 + (i % 2) * 152
+            by     = 82 + (i // 2) * 44
+            active = (self.current_tag == tag and self.music_playing)
+            self._btn(label, lambda t=tag: self._toggle_station(t),
+                      bx, by, w=132, h=32,
+                      bg="#4040a0" if active else "#2e2e5e")
+
+        self._txt(self.W//2, 184, "now playing", 8, color="#666688")
+        name   = ""
+        if self.current_tag and self.stations.get(self.current_tag):
+            idx  = self.station_idx.get(self.current_tag, 0)
+            st   = self.stations[self.current_tag][idx]
+            name = st.get("name", "")[:34]
+        status = "⏳ loading…" if self.music_loading else (name or "—")
+        self._txt(self.W//2, 202, status, 9, color=acc)
+
+        if self.music_playing:
+            self._btn("⏹  Stop", self._stop_music,   self.W//2-62, 236, w=110, h=32, bg="#2e2e40")
+            self._btn("⏭  Next", self._next_station, self.W//2+62, 236, w=110, h=32, bg="#2e2e5e")
+
+        self._txt(self.W//2, 278, "volume", 8, color="#666688")
+        vf = tk.Frame(self.root, bg="#14142e")
+        vs = tk.Scale(vf, from_=0, to=100, orient="horizontal",
+                      length=210, bg="#14142e", fg=acc,
+                      troughcolor="#2a2a4a", highlightthickness=0,
+                      showvalue=False, sliderlength=14,
+                      command=self._set_volume)
+        vs.set(int(self.music_volume * 100))
+        vs.pack()
+        self.cv.create_window(self.W//2, 298, window=vf, tags="ui", width=230, height=30)
+
+        self._btn("← Back", self._show_idle, self.W//2, 352, w=90, h=28,
+                  bg="#252540", size=9)
+        self._mini_btn()
+        self._close_btn()
+
+    def _toggle_station(self, tag):
+        if self.current_tag == tag and self.music_playing:
+            self._stop_music()
+            return
+        self.current_tag = tag
+        if self.stations.get(tag):
+            self._play_current()
+        else:
+            self._fetch_and_play(tag)
+
+    def _fetch_and_play(self, tag):
+        self.music_loading = True
+        self._show_music()
+
+        def fetch():
+            try:
+                api_tag = RADIO_TAGS[tag]
+                url = (f"https://de1.api.radio-browser.info/json/stations/search"
+                       f"?tag={api_tag}&limit=12&order=votes&hidebroken=true&codec=MP3")
+                with urllib.request.urlopen(url, timeout=7) as r:
+                    data = json.loads(r.read())
+                self.stations[tag] = [s for s in data if s.get("url_resolved")]
+                self.station_idx[tag] = 0
+            except Exception:
+                self.stations[tag] = []
+            self.music_loading = False
+            if self.stations.get(tag):
+                self.root.after(0, self._play_current)
+            else:
+                self.root.after(0, self._show_music)
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _play_current(self):
+        tag = self.current_tag
+        if not tag or not self.stations.get(tag):
+            return
+        url = self.stations[tag][self.station_idx.get(tag, 0)].get("url_resolved", "")
+        if not url:
+            return
+        self.music_loading = True
+        self._show_music()
+
+        def load():
+            try:
+                pygame.mixer.music.load(url)
+                pygame.mixer.music.play(-1)
+                pygame.mixer.music.set_volume(self.music_volume)
+                self.music_playing = True
+            except Exception:
+                self.music_playing = False
+            self.music_loading = False
+            self.root.after(0, self._show_music)
+
+        threading.Thread(target=load, daemon=True).start()
+
+    def _stop_music(self):
+        try: pygame.mixer.music.stop()
+        except Exception: pass
+        self.music_playing = False
+        self._show_music()
+
+    def _next_station(self):
+        tag = self.current_tag
+        if not tag or not self.stations.get(tag):
+            return
+        n = len(self.stations[tag])
+        self.station_idx[tag] = (self.station_idx.get(tag, 0) + 1) % n
+        self._play_current()
+
+    def _set_volume(self, val):
+        self.music_volume = int(val) / 100
+        try: pygame.mixer.music.set_volume(self.music_volume)
+        except Exception: pass
+
+    # ── SETTINGS ─────────────────────────────────────────────────────────────────
+
+    def _show_settings(self):
+        self.state = "settings"
+        self._clear()
+        acc = self.theme["acc"]
+
+        self._txt(self.W//2, 26, "⚙  Settings", 14, bold=True)
+        self._txt(self.W//2, 56, "color theme", 9, color="#8888bb")
+
+        keys = list(self.THEMES.keys())
+        for i, key in enumerate(keys):
+            th = self.THEMES[key]
+            bx = 64 + (i % 3) * 98
+            by = 86 + (i // 3) * 44
+            active = self.theme_key == key
+            self._btn(th["label"], lambda k=key: self._set_theme(k),
+                      bx, by, w=86, h=32,
+                      bg="#4040a0" if active else "#2e2e5e",
+                      fg=th["acc"] if not active else "white", size=8)
+
+        self._txt(self.W//2, 158, "opacity", 9, color="#8888bb")
+        of = tk.Frame(self.root, bg="#14142e")
+        os_ = tk.Scale(of, from_=40, to=100, orient="horizontal",
+                       length=220, bg="#14142e", fg=acc,
+                       troughcolor="#2a2a4a", highlightthickness=0,
+                       showvalue=False, sliderlength=14,
+                       command=lambda v: self.root.attributes("-alpha", int(v)/100))
+        os_.set(int(self.root.attributes("-alpha") * 100))
+        os_.pack()
+        self.cv.create_window(self.W//2, 182, window=of, tags="ui", width=240, height=30)
+
+        self._btn("← Back", self._show_idle, self.W//2, 246, w=90, h=28,
+                  bg="#252540", size=9)
+        self._mini_btn()
+        self._close_btn()
+
+    def _set_theme(self, key):
+        self.theme_key = key
+        self.cv.config(bg=self.THEMES[key]["bg"])
+        self._show_settings()
 
     # ── SOUND ────────────────────────────────────────────────────────────────────
 
@@ -426,39 +731,19 @@ class Pomodoro:
                 except Exception: pass
         threading.Thread(target=_play, daemon=True).start()
 
-    def _play_start(self):
-        self._beep([(523, 80), (659, 80), (784, 120)])      # C E G — focus chord
-
-    def _play_break(self):
-        self._beep([(784, 80), (659, 80), (523, 120)])      # G E C — descend, relax
-
-    def _play_done(self):
-        self._beep([(523,80),(659,80),(784,80),(1047,200)])  # celebration arpeggio
+    def _play_start(self): self._beep([(523,80),(659,80),(784,120)])
+    def _play_break(self): self._beep([(784,80),(659,80),(523,120)])
+    def _play_done(self):  self._beep([(523,80),(659,80),(784,80),(1047,200)])
 
     # ── DRAG ─────────────────────────────────────────────────────────────────────
 
     def _drag_start(self, e):
-        # bottom-right 22px corner = resize grip
-        if e.x > self.W - 22 and e.y > self.H - 22:
-            self._resizing = True
-            self._rx, self._ry = e.x, e.y
-        else:
-            self._resizing = False
-            self._ox, self._oy = e.x, e.y
+        self._ox, self._oy = e.x, e.y
 
     def _drag_move(self, e):
-        if self._resizing:
-            dw = e.x - self._rx
-            dh = e.y - self._ry
-            self._rx, self._ry = e.x, e.y
-            self.W = max(280, self.W + dw)
-            self.H = max(340, self.H + dh)
-            self.root.geometry(f"{self.W}x{self.H}")
-            self.cv.config(width=self.W, height=self.H)
-        else:
-            x = self.root.winfo_x() + e.x - self._ox
-            y = self.root.winfo_y() + e.y - self._oy
-            self.root.geometry(f"+{x}+{y}")
+        x = self.root.winfo_x() + e.x - self._ox
+        y = self.root.winfo_y() + e.y - self._oy
+        self.root.geometry(f"+{x}+{y}")
 
 
 if __name__ == "__main__":
