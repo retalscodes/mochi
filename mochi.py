@@ -688,31 +688,43 @@ class Pomodoro:
         acc = self.theme["acc"]
 
         self._txt(self.W//2, 26, "⚙  Settings", 14, bold=True)
-        self._txt(self.W//2, 56, "color theme", 9, color="#8888bb")
 
+        # ── color theme ──────────────────────────────────────────────────────
+        self._txt(self.W//2, 54, "color theme", 9, color="#8888bb")
         keys = list(self.THEMES.keys())
         for i, key in enumerate(keys):
             th = self.THEMES[key]
             bx = 64 + (i % 3) * 98
-            by = 86 + (i // 3) * 44
+            by = 80 + (i // 3) * 44
             active = self.theme_key == key
             self._btn(th["label"], lambda k=key: self._set_theme(k),
                       bx, by, w=86, h=32,
                       bg="#4040a0" if active else "#2e2e5e",
                       fg=th["acc"] if not active else "white", size=8)
 
-        self._txt(self.W//2, 158, "opacity", 9, color="#8888bb")
-        of = tk.Frame(self.root, bg="#14142e")
-        os_ = tk.Scale(of, from_=40, to=100, orient="horizontal",
-                       length=220, bg="#14142e", fg=acc,
-                       troughcolor="#2a2a4a", highlightthickness=0,
-                       showvalue=False, sliderlength=14,
-                       command=lambda v: self.root.attributes("-alpha", int(v)/100))
-        os_.set(int(self.root.attributes("-alpha") * 100))
-        os_.pack()
-        self.cv.create_window(self.W//2, 182, window=of, tags="ui", width=240, height=30)
+        # ── opacity ──────────────────────────────────────────────────────────
+        self._txt(self.W//2, 174, "── window opacity ──", 8, color="#555577")
+        # show current % value dynamically
+        cur_pct = int(self.root.attributes("-alpha") * 100)
+        self.opacity_lbl = self.cv.create_text(
+            self.W//2, 196, text=f"{cur_pct}%",
+            font=("Segoe UI", 9), fill=acc, tags="ui")
 
-        self._btn("← Back", self._show_idle, self.W//2, 246, w=90, h=28,
+        of = tk.Frame(self.root, bg="#14142e")
+        def _on_opacity(v):
+            self.root.attributes("-alpha", int(v) / 100)
+            try: self.cv.itemconfig(self.opacity_lbl, text=f"{int(v)}%")
+            except Exception: pass
+        os_ = tk.Scale(of, from_=40, to=100, orient="horizontal",
+                       length=230, bg="#14142e", fg=acc,
+                       troughcolor="#2a2a4a", highlightthickness=0,
+                       showvalue=False, sliderlength=18,
+                       command=_on_opacity)
+        os_.set(cur_pct)
+        os_.pack()
+        self.cv.create_window(self.W//2, 220, window=of, tags="ui", width=250, height=34)
+
+        self._btn("← Back", self._show_idle, self.W//2, 282, w=90, h=28,
                   bg="#252540", size=9)
         self._mini_btn()
         self._close_btn()
