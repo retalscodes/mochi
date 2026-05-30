@@ -45,6 +45,8 @@ class Pomodoro:
         self.cv.pack(fill="both", expand=True)
 
         self._ox = self._oy = 0
+        self._resizing = False
+        self._rx = self._ry = 0
         self.cv.bind("<ButtonPress-1>", self._drag_start)
         self.cv.bind("<B1-Motion>",     self._drag_move)
 
@@ -81,6 +83,13 @@ class Pomodoro:
         # dark vignette overlay
         self.cv.create_rectangle(0, 0, self.W, self.H,
                                  fill="#000000", outline="", stipple="gray50", tags="bg")
+
+        # resize grip — bottom-right corner dots
+        gx, gy = self.W - 5, self.H - 5
+        for i in range(3):
+            d = i * 5
+            self.cv.create_line(gx - d, gy, gx, gy - d,
+                                fill="#555577", width=1, tags="bg")
 
         if self.state in ("focus", "break") and self.tt > 0:
             self._draw_ring()
@@ -429,12 +438,27 @@ class Pomodoro:
     # ── DRAG ─────────────────────────────────────────────────────────────────────
 
     def _drag_start(self, e):
-        self._ox, self._oy = e.x, e.y
+        # bottom-right 22px corner = resize grip
+        if e.x > self.W - 22 and e.y > self.H - 22:
+            self._resizing = True
+            self._rx, self._ry = e.x, e.y
+        else:
+            self._resizing = False
+            self._ox, self._oy = e.x, e.y
 
     def _drag_move(self, e):
-        x = self.root.winfo_x() + e.x - self._ox
-        y = self.root.winfo_y() + e.y - self._oy
-        self.root.geometry(f"+{x}+{y}")
+        if self._resizing:
+            dw = e.x - self._rx
+            dh = e.y - self._ry
+            self._rx, self._ry = e.x, e.y
+            self.W = max(280, self.W + dw)
+            self.H = max(340, self.H + dh)
+            self.root.geometry(f"{self.W}x{self.H}")
+            self.cv.config(width=self.W, height=self.H)
+        else:
+            x = self.root.winfo_x() + e.x - self._ox
+            y = self.root.winfo_y() + e.y - self._oy
+            self.root.geometry(f"+{x}+{y}")
 
 
 if __name__ == "__main__":
